@@ -72,11 +72,12 @@ app.get('/api/quotes', async (req, res) => {
 
 app.use(express.json());
 
-// ---------------- AI TUTOR PROXY ----------------
-// Keeps your Anthropic API key on the server, never sent to the browser.
-// Set ANTHROPIC_API_KEY as an environment variable wherever you deploy this.
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const CHAT_MODEL = process.env.CHAT_MODEL || 'claude-haiku-4-5-20251001';
+// ---------------- AI TUTOR PROXY (Google Gemini — free tier) ----------------
+// Keeps your Gemini API key on the server, never sent to the browser.
+// Get a free key at https://aistudio.google.com/apikey and set it as
+// GEMINI_API_KEY in your environment.
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const CHAT_MODEL = process.env.CHAT_MODEL || 'gemini-2.0-flash';
 
 const TUTOR_SYSTEM_PROMPT =
   "You are Coinwise AI, a friendly tutor inside a finance-education website for an Indian audience covering " +
@@ -86,7 +87,7 @@ const TUTOR_SYSTEM_PROMPT =
   "stocks/funds to buy — teach the concept and suggest consulting a licensed advisor for personal decisions.";
 
 // Very simple in-memory per-IP rate limit so a public page can't run up your
-// Anthropic bill. Resets whenever the server restarts — fine for a small project.
+// Gemini usage. Resets whenever the server restarts — fine for a small project.
 const RATE_LIMIT = 20; // requests
 const RATE_WINDOW_MS = 60 * 60 * 1000; // per hour
 const hits = new Map();
@@ -101,8 +102,8 @@ function isRateLimited(ip) {
 }
 
 app.post('/api/chat', async (req, res) => {
-  if (!ANTHROPIC_API_KEY) {
-    return res.status(503).json({ error: 'AI tutor is not configured on this server yet (missing ANTHROPIC_API_KEY).' });
+  if (!GEMINI_API_KEY) {
+    return res.status(503).json({ error: 'AI tutor is not configured on this server yet (missing GEMINI_API_KEY).' });
   }
   const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
   if (isRateLimited(ip)) {
@@ -114,29 +115,29 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: 'Send a "message" string under 2000 characters.' });
   }
   const turns = Array.isArray(history) ? history.slice(-8) : [];
+  const contents = [
+    ...turns.map(t => ({ role: t.role === 'assistant' ? 'model' : 'user', parts: [{ text: t.content }] })),
+    { role: 'user', parts: [{ text: message }] }
+  ];
 
   try {
-    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${CHAT_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    const geminiRes = await fetch(url, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: CHAT_MODEL,
-        max_tokens: 400,
-        system: TUTOR_SYSTEM_PROMPT,
-        messages: [...turns, { role: 'user', content: message }]
+        contents,
+        systemInstruction: { parts: [{ text: TUTOR_SYSTEM_PROMPT }] },
+        generationConfig: { maxOutputTokens: 400 }
       })
     });
 
-    if (!anthropicRes.ok) {
-      const detail = await anthropicRes.text();
+    if (!geminiRes.ok) {
+      const detail = await geminiRes.text();
       return res.status(502).json({ error: 'AI tutor upstream error', detail });
     }
-    const data = await anthropicRes.json();
-    const reply = (data.content || []).map(b => b.text || '').join('').trim();
+    const data = await geminiRes.json();
+    const reply = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim();
     res.json({ reply: reply || "I couldn't come up with an answer to that — try rephrasing." });
   } catch (err) {
     res.status(502).json({ error: 'Failed to reach the AI tutor', detail: err.message });
